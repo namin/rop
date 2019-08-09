@@ -49,10 +49,22 @@
 (define make-value-reflective (instance-constructor <value-reflective> '() 'no-init))
 (define make-control-reflective (instance-constructor <control-reflective> '(objs) 'no-init))
 
-(define-syntax bind
-  (syntax-rules (gamma)
-    ((_ (v ev) e)
-     (gamma ev (lambda (v) e)))))
+(define (reflective-ref c r)
+  (if (instance-of? c <control-reflective>)
+      (if (instance-of? c r)
+          c
+          (reflective-ref (slot-value c 'objs) r))
+      (if (instance-of? (car c) r)
+          (car c)
+          (reflective-ref (cdr c) r))))
+(define (reflective-subst o r c)
+  (if (instance-of? c <control-reflective>)
+      (if (instance-of? c r)
+          (slot-subst o 'objs (slot-value c 'objs))
+          (slot-subst c 'objs (reflective-subst o r (slot-value c 'objs))))
+      (if (instance-of? (car c) r)
+          (cons o (cdr c))
+          (cons (car c) (reflective-subst o r (cdr c))))))
 
 (define (constant? e)
   (not (or (symbol? e) (pair? e))))
@@ -63,6 +75,8 @@
     ((symbol? e) `(_alpha ,e))
     ((eq? (car e) 'lambda)
      `(_alpha (lambda ,(cadr e) ,(trans (caddr e)))))
+    ((eq? (car e) 'let)
+     (trans `((lambda ,(map car (cadr e)) . ,(cddr e)) . ,(map cadr (cadr e)))))
     ((eq? (car e) 'if)
      `(_bind (_t ,(trans (cadr e)))
              (if _t ,(trans (caddr e)) ,(trans (cadddr e)))))
@@ -73,6 +87,13 @@
     ((eq? (car e) 'slot-value)
      `(_bind (_e ,(trans (cadr e)))
              (_alpha (slot-value _e ,(caddr e)))))
+    ((eq? (car e) 'reify)
+     `(_bind (_r ,(trans (cadr e)))
+             (lambda (_c) ((_alpha (_reflective-ref _c _r)) _c))))
+    ((eq? (car e) 'reflect)
+     `(_bind (_r ,(trans (cadr e)))
+             (_bind (_o ,(trans (caddr e)))
+                    (lambda (_c) (,(trans (cadddr e)) (_reflective-subst _o _r _c))))))
     (else
      (let ((names (list '_e0 '_e1 '_e2 '_e3 '_e4)))
        (fold-left (lambda (x y) `(_bind ,y ,x))
@@ -89,24 +110,43 @@
     ((eq? (car e) '_bind)
      (gamma (ev (cadr (cadr e)) env) (lambda (x)
        (ev (caddr e) (lambda (y) (if (eq? y (car (cadr e))) x (env y)))))))
+    ((eq? (car e) '_reflective-ref)
+     (reflective-ref (ev (cadr e) env) (ev (caddr e) env)))
+    ((eq? (car e) '_reflective-subst)
+     (reflective-subst (ev (cadr e) env) (ev (caddr e) env) (ev (cadddr e) env)))
     ((eq? (car e) 'lambda)
-     (lambda (x) (ev (caddr e) (lambda (y) (if (eq? y (cadr e)) x (env y))))))
+     (lambda (x) (ev (caddr e) (lambda (y) (if (eq? y (car (cadr e))) x (env y))))))
     ((eq? (car e) 'if)
      (if (ev (cadr e) env) (ev (caddr e) env) (ev (cadddr e) env)))
     ((eq? (car e) 'slot-subst)
-     (slot-subst (ev (cadr e) env) (caddr e) (ev (cadddr e) env)))
+     (slot-subst (ev (cadr e) env) (cadr (caddr e)) (ev (cadddr e) env)))
     ((eq? (car e) 'slot-value)
-     (slot-value (ev (cadr e) env) (caddr e)))
+     (slot-value (ev (cadr e) env) (cadr (caddr e))))
     (else
      (let ((rs (map (lambda (x) (ev x env)) e)))
        (apply (car rs) (cdr rs))))))
 
-;;; examples
+(load-option 'format)
+
+(define-syntax eg
+  (syntax-rules ()
+    ((_ tested-expression expected-result)
+     (begin
+       (format #t "Testing ~a\n" 'tested-expression)
+       (let* ((expected expected-result)
+              (produced tested-expression))
+         (or (equal? expected produced)
+             (errorf 'test-check
+               "Failed: ~a~%Expected: ~a~%Computed: ~a~%"
+               'tested-expression expected produced)))))))
 
 (define (vanilla-ev e)
   (let ((f (ev (trans e) (lambda (y) (error 'env (list 'unbound 'variable y)))))
         (c (make-control-reflective (list (make-value-reflective)))))
     (slot-value (car (slot-value (car (f c)) 'objs)) 'base-value)))
+
+(eg (vanilla-ev 1) 1)
+(eg (vanilla-ev '((lambda (x) x) 1)) 1)
 
 (define-class <runtime> (<simple-reflective>) (ticks initial-value 0))
 (define make-runtime (instance-constructor <runtime> '() 'no-init))
@@ -116,9 +156,30 @@
   (slot-subst outer 'ticks (1+ (slot-value outer 'ticks))))
 
 (define (instr-ev e)
-  (let ((f (ev (trans e) (lambda (y) (error 'env (list 'unbound 'variable y)))))
+  (let ((f (ev (trans e) (lambda (y)
+                           (if (eq? y '<runtime>) <runtime>
+                               (error 'env (list 'unbound 'variable y))))))
         (c (make-control-reflective (list (make-value-reflective) (make-runtime)))))
     (list
      (slot-value (car (slot-value (car (f c)) 'objs)) 'base-value)
      (slot-value (cadr (slot-value (car (f c)) 'objs)) 'ticks))
     ))
+
+(eg (instr-ev 1) '(1 1))
+(eg (instr-ev '((lambda (x) x) 1)) '(1 5))
+
+(eg
+ (instr-ev '(let ((r (reify <runtime>)))
+              (let ((result ((lambda (x) x) 1)))
+                (reflect <runtime> r result))))
+
+ (instr-ev '(let ((r (reify <runtime>)))
+              (let ((result ((lambda (x) x) ((lambda (x) x) 1))))
+                (reflect <runtime> r result)))))
+
+(eg
+ (instr-ev '(let ((r (reify <runtime>)))
+              (let ((result 1))
+                (let ((t (slot-value (reify <runtime>) 'ticks)))
+                  (reflect <runtime> r t)))))
+ '(16 6))
