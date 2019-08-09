@@ -140,8 +140,17 @@
                "Failed: ~a~%Expected: ~a~%Computed: ~a~%"
                'tested-expression expected produced)))))))
 
+(define init-env
+  (lambda (y)
+    (cond
+      ((eq? y 'list) (lambda xs (alpha (apply list xs))))
+      ((eq? y 'pair?) (lambda (x) (alpha (pair? x))))
+      ((eq? y 'car) (lambda (x) (alpha (car x))))
+      ((eq? y '+) (lambda xs (alpha (apply + xs))))
+      (else (error 'env (list 'unbound 'variable y))))))
+
 (define (vanilla-ev e)
-  (let ((f (ev (trans e) (lambda (y) (error 'env (list 'unbound 'variable y)))))
+  (let ((f (ev (trans e) init-env))
         (c (make-control-reflective (list (make-value-reflective)))))
     (slot-value (car (slot-value (car (f c)) 'objs)) 'base-value)))
 
@@ -158,7 +167,7 @@
 (define (instr-ev e)
   (let ((f (ev (trans e) (lambda (y)
                            (if (eq? y '<runtime>) <runtime>
-                               (error 'env (list 'unbound 'variable y))))))
+                               (init-env y)))))
         (c (make-control-reflective (list (make-value-reflective) (make-runtime)))))
     (list
      (slot-value (car (slot-value (car (f c)) 'objs)) 'base-value)
@@ -183,3 +192,29 @@
                 (let ((t (slot-value (reify <runtime>) 'ticks)))
                   (reflect <runtime> r t)))))
  '(16 6))
+
+(define-class <cont> (<control-reflective>) cc)
+(define-method atomic-control ((outer <cont>) atom)
+  (append-map (lambda (x) ((car (slot-value x 'cc)) (slot-subst x 'cc (cdr (slot-value x 'cc))))) (atom outer)))
+(define-method compound-control ((outer <cont>) initial rest)
+  (initial (slot-subst outer 'cc (cons rest (slot-value outer 'cc)))))
+
+
+(define make-cont (instance-constructor <cont> '(objs cc) 'no-init))
+(define (cont-ev e)
+  (let ((f (ev (trans e) (lambda (y)
+                           (if (eq? y '<cont>) <cont>
+                               (init-env y)))))
+        (c (make-cont (list (make-value-reflective)) (list (lambda (x) (list x))))))
+    (slot-value (car (slot-value (car (f c)) 'objs)) 'base-value)))
+
+(eg
+ (cont-ev
+  '(let ((call/cc (lambda (f)
+                    (let ((x (reify <cont>)))
+                      (if (pair? x)
+                          (car x)
+                          (f (lambda (v) (let ((new (reify <cont>)))
+                                      (reflect <cont> (slot-subst new 'cc (slot-value x 'cc)) (list v))))))))))
+     (+ 3 (call/cc (lambda (k) (+ (k 1) 2))))))
+ 4)
