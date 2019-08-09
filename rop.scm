@@ -75,6 +75,8 @@
     ((symbol? e) `(_alpha ,e))
     ((eq? (car e) 'lambda)
      `(_alpha (lambda ,(cadr e) ,(trans (caddr e)))))
+    ((eq? (car e) 'quote)
+     `(_alpha ,e))
     ((eq? (car e) 'let)
      (trans `((lambda ,(map car (cadr e)) . ,(cddr e)) . ,(map cadr (cadr e)))))
     ((eq? (car e) 'if)
@@ -114,6 +116,8 @@
      (reflective-ref (ev (cadr e) env) (ev (caddr e) env)))
     ((eq? (car e) '_reflective-subst)
      (reflective-subst (ev (cadr e) env) (ev (caddr e) env) (ev (cadddr e) env)))
+    ((eq? (car e) 'quote)
+     (cadr e))
     ((eq? (car e) 'lambda)
      (lambda (x) (ev (caddr e) (lambda (y) (if (eq? y (car (cadr e))) x (env y))))))
     ((eq? (car e) 'if)
@@ -146,7 +150,13 @@
       ((eq? y 'list) (lambda xs (alpha (apply list xs))))
       ((eq? y 'pair?) (lambda (x) (alpha (pair? x))))
       ((eq? y 'car) (lambda (x) (alpha (car x))))
+      ((eq? y 'cdr) (lambda (x) (alpha (cdr x))))
+      ((eq? y 'cons) (lambda (x y) (alpha (cons x y))))
+      ((eq? y 'assq) (lambda (x y) (alpha (assq x y))))
       ((eq? y '+) (lambda xs (alpha (apply + xs))))
+      ((eq? y 'number?) (lambda (x) (alpha (number? x))))
+      ((eq? y 'symbol?) (lambda (x) (alpha (symbol? x))))
+      ((eq? y 'eq?) (lambda (x y) (alpha (eq? x y))))
       (else (error 'env (list 'unbound 'variable y))))))
 
 (define (vanilla-ev e)
@@ -163,7 +173,6 @@
   (slot-subst outer 'ticks (1+ (slot-value outer 'ticks))))
 (define-method compound-initial ((outer <runtime>))
   (slot-subst outer 'ticks (1+ (slot-value outer 'ticks))))
-
 (define (instr-ev e)
   (let ((f (ev (trans e) (lambda (y)
                            (if (eq? y '<runtime>) <runtime>
@@ -176,7 +185,6 @@
 
 (eg (instr-ev 1) '(1 1))
 (eg (instr-ev '((lambda (x) x) 1)) '(1 5))
-
 (eg
  (instr-ev '(let ((r (reify <runtime>)))
               (let ((result ((lambda (x) x) 1)))
@@ -192,6 +200,39 @@
                 (let ((t (slot-value (reify <runtime>) 'ticks)))
                   (reflect <runtime> r t)))))
  '(16 6))
+
+(define-class <env> (<simple-reflective>) (bindings initial-value '()))
+(define-method compound-rest ((outer <env>) (inner <env>)) outer)
+(define make-env (instance-constructor <env> '() 'no-init))
+(define (env-ev e)
+  (let ((f (ev (trans e) (lambda (y)
+                           (if (eq? y '<env>) <env>
+                               (init-env y)))))
+        (c (make-control-reflective (list (make-value-reflective) (make-env)))))
+    (slot-value (car (slot-value (car (f c)) 'objs)) 'base-value)))
+
+(eg
+ (env-ev
+  '(((lambda (fun)
+       ((lambda (F)
+          (F F))
+        (lambda (F)
+          (fun (lambda (x) ((F F) x))))))
+     (lambda (interp) (lambda (exp)
+                   (if (number? exp) exp
+                       (if (symbol? exp)
+                           (let ((e (reify <env>)))
+                             (cdr (assq exp (slot-value e 'bindings))))
+                           (if (eq? (car exp) 'lambda)
+                               (let ((e1 (reify <env>)))
+                                 (let ((b (slot-value e1 'bindings)))
+                                   (lambda (a) (let ((e2 (reify <env>)))
+                                            (reflect <env> (slot-subst e2 'bindings
+                                                                       (cons (cons (car (car (cdr exp))) a) b))
+                                                     (interp (car (cdr (cdr exp)))))))))
+                               ((interp (car exp)) (interp (car (cdr exp))))))))))
+    '((lambda (x) x) 1)))
+ 1)
 
 (define bound-to-1000 (lambda (i) (min 1000 (max -1000 i))))
 (define-class <bounded-int> (<value-reflective>))
