@@ -16,18 +16,18 @@
 (define-class <value-reflective> (<simple-reflective>) base-value)
 (define-class <control-reflective> (<reflective>) (objs initial-value '()))
 
-(define-generic atomic (v outer))
+(define-generic atomic (e v outer))
 (define-generic compound-initial (outer))
 (define-generic compound-rest (outer inner))
 
 (define-generic atomic-control (outer atom))
 (define-generic compound-control (outer initial rest))
 
-(define-method atomic (v (outer <simple-reflective>)) outer)
+(define-method atomic (e v (outer <simple-reflective>)) outer)
 (define-method compound-initial ((outer <simple-reflective>)) outer)
 (define-method compound-rest ((outer <simple-reflective>) (inner <simple-reflective>)) inner)
 
-(define-method atomic (v (outer <value-reflective>)) (slot-subst outer 'base-value v))
+(define-method atomic (e v (outer <value-reflective>)) (slot-subst outer 'base-value v))
 
 (define-method atomic-control ((outer <control-reflective>) atom) (atom outer))
 (define-method compound-control ((outer <control-reflective>) initial rest) (append-map rest (initial outer)))
@@ -35,9 +35,9 @@
 (define (value-objs c)
   (filter (lambda (x) (instance-of? x <value-reflective>)) (slot-value c 'objs)))
 
-(define (alpha v)
+(define (alpha e v)
   (lambda (c)
-    (atomic-control c (lambda (c1) (list (slot-subst c1 'objs (map (lambda (s) (atomic v s)) (slot-value c1 'objs))))))))
+    (atomic-control c (lambda (c1) (list (slot-subst c1 'objs (map (lambda (s) (atomic e v s)) (slot-value c1 'objs))))))))
 (define (gamma i r)
   (lambda (c)
     (compound-control c
@@ -108,7 +108,7 @@
     ((constant? e) e)
     ((symbol? e) (env e))
     ((eq? (car e) '_alpha)
-     (alpha (ev (cadr e) env)))
+     (alpha (cadr e) (ev (cadr e) env)))
     ((eq? (car e) '_bind)
      (gamma (ev (cadr (cadr e)) env) (lambda (x)
        (ev (caddr e) (lambda (y) (if (eq? y (car (cadr e))) x (env y)))))))
@@ -146,19 +146,22 @@
                        'tested-expression expected produced)
                (error 'test-check))))))))
 
+(define (alphaq v)
+  (alpha `(prim ,v) v))
+
 (define init-env
   (lambda (y)
     (cond
-      ((eq? y 'list) (lambda xs (alpha (apply list xs))))
-      ((eq? y 'pair?) (lambda (x) (alpha (pair? x))))
-      ((eq? y 'car) (lambda (x) (alpha (car x))))
-      ((eq? y 'cdr) (lambda (x) (alpha (cdr x))))
-      ((eq? y 'cons) (lambda (x y) (alpha (cons x y))))
-      ((eq? y 'assq) (lambda (x y) (alpha (assq x y))))
-      ((eq? y '+) (lambda xs (alpha (apply + xs))))
-      ((eq? y 'number?) (lambda (x) (alpha (number? x))))
-      ((eq? y 'symbol?) (lambda (x) (alpha (symbol? x))))
-      ((eq? y 'eq?) (lambda (x y) (alpha (eq? x y))))
+      ((eq? y 'list) (lambda xs (alphaq (apply list xs))))
+      ((eq? y 'pair?) (lambda (x) (alphaq (pair? x))))
+      ((eq? y 'car) (lambda (x) (alphaq (car x))))
+      ((eq? y 'cdr) (lambda (x) (alphaq (cdr x))))
+      ((eq? y 'cons) (lambda (x y) (alphaq (cons x y))))
+      ((eq? y 'assq) (lambda (x y) (alphaq (assq x y))))
+      ((eq? y '+) (lambda xs (alphaq (apply + xs))))
+      ((eq? y 'number?) (lambda (x) (alphaq (number? x))))
+      ((eq? y 'symbol?) (lambda (x) (alphaq (symbol? x))))
+      ((eq? y 'eq?) (lambda (x y) (alphaq (eq? x y))))
       (else (error 'env (list 'unbound 'variable y))))))
 
 (define (vanilla-ev e)
@@ -171,7 +174,7 @@
 
 (define-class <runtime> (<simple-reflective>) (ticks initial-value 0))
 (define make-runtime (instance-constructor <runtime> '() 'no-init))
-(define-method atomic (v (outer <runtime>))
+(define-method atomic (e v (outer <runtime>))
   (slot-subst outer 'ticks (1+ (slot-value outer 'ticks))))
 (define-method compound-initial ((outer <runtime>))
   (slot-subst outer 'ticks (1+ (slot-value outer 'ticks))))
@@ -238,7 +241,7 @@
 
 (define bound-to-1000 (lambda (i) (min 1000 (max -1000 i))))
 (define-class <bounded-int> (<value-reflective>))
-(define-method atomic (v (outer <bounded-int>)) (slot-subst outer 'base-value (if (number? v) (bound-to-1000 v) v)))
+(define-method atomic (e v (outer <bounded-int>)) (slot-subst outer 'base-value (if (number? v) (bound-to-1000 v) v)))
 (define-method compound-rest ((outer <bounded-int>) (inner <bounded-int>))
   (let ((t (slot-value inner 'base-value)))
     (if (number? t)
@@ -281,3 +284,25 @@
                                       (reflect <cont> (slot-subst new 'cc (slot-value x 'cc)) (list v))))))))))
      (+ 3 (call/cc (lambda (k) (+ (k 1) 2))))))
  4)
+
+(define-class <runtime-var> (<runtime>))
+(define make-runtime-var (instance-constructor <runtime-var> '() 'no-init))
+(define-method atomic (e v (outer <runtime-var>))
+  (if (symbol? e)
+      (begin
+        (format #t "var ~a\n" e)
+        (slot-subst outer 'ticks (1+ (slot-value outer 'ticks))))
+      outer))
+(define-method compound-initial ((outer <runtime-var>))
+  outer)
+(define (instr-var-ev e)
+  (let ((f (ev (trans e) init-env))
+        (c (make-control-reflective (list (make-value-reflective) (make-runtime-var)))))
+    (let ((r (f c)))
+      (list
+       (slot-value (car (slot-value (car r) 'objs)) 'base-value)
+       (slot-value (cadr (slot-value (car r) 'objs)) 'ticks)))))
+(eg (instr-var-ev 1) '(1 0))
+(eg (instr-var-ev '((lambda (x) x) 1)) '(1 1))
+(eg (instr-var-ev '(let ((x 1)) x)) '(1 1))
+(eg (instr-var-ev '(let ((x 1)) (+ x x))) '(2 3))
