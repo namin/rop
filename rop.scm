@@ -140,9 +140,11 @@
        (let* ((expected expected-result)
               (produced tested-expression))
          (or (equal? expected produced)
-             (errorf 'test-check
-               "Failed: ~a~%Expected: ~a~%Computed: ~a~%"
-               'tested-expression expected produced)))))))
+             (begin
+               (format #t
+                       "Failed: ~a~%Expected: ~a~%Computed: ~a~%"
+                       'tested-expression expected produced)
+               (error 'test-check))))))))
 
 (define init-env
   (lambda (y)
@@ -178,10 +180,10 @@
                            (if (eq? y '<runtime>) <runtime>
                                (init-env y)))))
         (c (make-control-reflective (list (make-value-reflective) (make-runtime)))))
-    (list
-     (slot-value (car (slot-value (car (f c)) 'objs)) 'base-value)
-     (slot-value (cadr (slot-value (car (f c)) 'objs)) 'ticks))
-    ))
+    (let ((r (f c)))
+      (list
+       (slot-value (car (slot-value (car r) 'objs)) 'base-value)
+       (slot-value (cadr (slot-value (car r) 'objs)) 'ticks)))))
 
 (eg (instr-ev 1) '(1 1))
 (eg (instr-ev '((lambda (x) x) 1)) '(1 5))
